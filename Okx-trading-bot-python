@@ -1,0 +1,376 @@
+# OKX Trading Bot - Python (project skeleton)
+# Project: okx-trading-bot-python
+# Structure shown below; each file starts with a header like: "### FILE: path"
+
+### FILE: README.md
+"""
+# OKX Trading Bot (Python)
+
+Production-ready skeleton for an algorithmic trading bot on OKX.
+
+See files in /src for client, strategies, risk and main loop.
+"""
+
+### FILE: .gitignore
+"""
+__pycache__/
+.env
+secrets.yaml
+*.pyc
+logs/
+"""
+
+### FILE: requirements.txt
+"""
+httpx==0.24.0
+websockets==11.0.3
+PyYAML==6.0
+python-dotenv==1.0.0
+pytest==7.4.0
+"""
+
+### FILE: config/settings.yaml
+"""
+okx:
+  base_url: "https://www.okx.com"
+  api_key: "YOUR_API_KEY"
+  api_secret: "YOUR_SECRET"
+  passphrase: "YOUR_PASSPHRASE"
+  timeout: 10
+  max_retries: 5
+
+bot:
+  symbol: "BTC-USDT"
+  strategy: "moving_average"
+  trade_size: 0.001
+  risk:
+    max_daily_loss_pct: 2.0
+    max_order_pct_balance: 10.0
+"""
+
+### FILE: src/utils/logger.py
+"""
+Simple logger wrapper.
+"""
+from datetime import datetime
+import logging
+import os
+
+LOG_DIR = os.path.join(os.getcwd(), "logs")
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(LOG_DIR, 'bot.log')),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger('okx-bot')
+
+### FILE: src/auth.py
+"""
+Authentication helpers for OKX signature generation.
+"""
+import hmac
+import hashlib
+import base64
+from time import time
+
+
+def generate_okx_signature(timestamp: str, method: str, request_path: str, body: str, secret_key: str) -> str:
+    """Create OKX signature according to docs.
+    timestamp should be a string (ISO 8601) or epoch in seconds as string.
+    method uppercase: GET/POST
+    request_path: path including query, e.g. /api/v5/account/balance
+    body: JSON string or empty string
+    """
+    message = f"{timestamp}{method.upper()}{request_path}{body}"
+    mac = hmac.new(secret_key.encode('utf-8'), message.encode('utf-8'), hashlib.sha256)
+    return base64.b64encode(mac.digest()).decode('utf-8')
+
+### FILE: src/okx_client.py
+"""
+Minimal OKX REST client using httpx with retries and signing.
+WebSocket helper included as a lightweight wrapper (placeholder).
+"""
+from typing import Optional, Dict, Any
+import httpx
+import json
+from time import time
+from urllib.parse import urljoin
+import asyncio
+import websockets
+
+from .auth import generate_okx_signature
+from .utils.logger import logger
+
+
+class OkxClient:
+    def __init__(self, base_url: str, api_key: str, api_secret: str, passphrase: str, timeout: int = 10, max_retries: int = 3):
+        self.base_url = base_url.rstrip('/')
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.passphrase = passphrase
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self._client = httpx.Client(timeout=self.timeout)
+
+    def _sign_headers(self, method: str, request_path: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+        ts = str(time())
+        body_str = json.dumps(body) if body else ""
+        signature = generate_okx_signature(ts, method, request_path, body_str, self.api_secret)
+        headers = {
+            'OK-ACCESS-KEY': self.api_key,
+            'OK-ACCESS-SIGN': signature,
+            'OK-ACCESS-TIMESTAMP': ts,
+            'OK-ACCESS-PASSPHRASE': self.passphrase,
+            'Content-Type': 'application/json'
+        }
+        return headers
+
+    def _request(self, method: str, path: str, params: Dict = None, data: Dict = None) -> Dict:
+        url = urljoin(self.base_url + '/', path.lstrip('/'))
+        request_path = path if path.startswith('/') else '/' + path
+        body = data or {}
+        headers = self._sign_headers(method, request_path, body if data else None)
+
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                logger.info(f"{method} {url} attempt {attempt}")
+                if method.upper() == 'GET':
+                    r = self._client.get(url, params=params, headers=headers)
+                else:
+                    r = self._client.post(url, json=data, params=params, headers=headers)
+                r.raise_for_status()
+                resp = r.json()
+                if 'code' in resp and resp.get('code') not in ("0", 0, None):
+                    # OKX returns non-zero codes for errors
+                    logger.warning(f"OKX API returned error: {resp}")
+                    raise Exception(f"OKX error: {resp}")
+                return resp
+            except Exception as e:
+                logger.error(f"Request failed (attempt {attempt}): {e}")
+                if attempt == self.max_retries:
+                    raise
+        raise RuntimeError("unreachable")
+
+    # Account endpoints
+    def get_balances(self) -> Dict:
+        return self._request('GET', '/api/v5/account/balance')
+
+    # Market data
+    def get_ticker(self, symbol: str) -> Dict:
+        return self._request('GET', f'/api/v5/market/ticker?instId={symbol}')
+
+    def get_candles(self, symbol: str, bar: str = '1m', limit: int = 100):
+        return self._request('GET', f'/api/v5/market/candles?instId={symbol}&bar={bar}&limit={limit}')
+
+    # Trading
+    def place_order(self, instId: str, side: str, ordType: str, sz: str, px: Optional[str] = None) -> Dict:
+        data = {
+            'instId': instId,
+            'tdMode': 'cash',
+            'side': side,
+            'ordType': ordType,
+            'sz': sz
+        }
+        if px is not None:
+            data['px'] = px
+        return self._request('POST', '/api/v5/trade/order', data=data)
+
+    def cancel_order(self, instId: str, ordId: str) -> Dict:
+        return self._request('POST', '/api/v5/trade/cancel-order', data={'instId': instId, 'ordId': ordId})
+
+    def get_order(self, instId: str, ordId: str) -> Dict:
+        return self._request('GET', f'/api/v5/trade/order?instId={instId}&ordId={ordId}')
+
+    # WebSocket (market data). This is a light wrapper, user can customize handlers.
+    async def ws_subscribe_ticker(self, symbol: str, on_message):
+        ws_url = self.base_url.replace('https', 'wss') + '/ws/v5/public'
+        async with websockets.connect(ws_url) as ws:
+            sub = {"op": "subscribe", "args": [{"channel": "tickers", "instId": symbol}]}
+            await ws.send(json.dumps(sub))
+            logger.info(f"Subscribed to {symbol} ticker via WS")
+            async for msg in ws:
+                on_message(json.loads(msg))
+
+
+### FILE: src/risk.py
+"""
+Risk management helpers.
+"""
+from typing import Dict
+
+
+def check_risk(balance: float, order_size: float, max_order_pct: float, max_daily_loss_pct: float, current_daily_loss_pct: float) -> bool:
+    """Return True if trade is allowed."""
+    if current_daily_loss_pct >= max_daily_loss_pct:
+        return False
+    max_order_size = balance * (max_order_pct / 100.0)
+    if order_size > max_order_size:
+        return False
+    return True
+
+### FILE: src/strategies/base.py
+"""
+BaseStrategy interface.
+"""
+from abc import ABC, abstractmethod
+from typing import Dict, Optional
+
+class BaseStrategy(ABC):
+    @abstractmethod
+    def on_tick(self, price: float, market_data: Dict) -> Optional[Dict]:
+        """Return action dict or None."""
+        pass
+
+### FILE: src/strategies/moving_average.py
+"""
+Simple moving average crossover strategy.
+"""
+from collections import deque
+from typing import Dict, Optional
+from .base import BaseStrategy
+
+class MovingAverageStrategy(BaseStrategy):
+    def __init__(self, short_window: int = 50, long_window: int = 200):
+        self.short_window = short_window
+        self.long_window = long_window
+        self.prices = deque(maxlen=long_window)
+        self.position = 0
+
+    def on_tick(self, price: float, market_data: Dict) -> Optional[Dict]:
+        self.prices.append(price)
+        if len(self.prices) < self.long_window:
+            return None
+        short_ma = sum(list(self.prices)[-self.short_window:]) / self.short_window
+        long_ma = sum(self.prices) / self.long_window
+        # simple crossover
+        if short_ma > long_ma and self.position <= 0:
+            self.position = 1
+            return {"side": "buy", "size": market_data.get('trade_size'), "type": "market"}
+        if short_ma < long_ma and self.position >= 0:
+            self.position = -1
+            return {"side": "sell", "size": market_data.get('trade_size'), "type": "market"}
+        return None
+
+### FILE: src/trading.py
+"""
+Trading orchestration using OkxClient and strategies.
+"""
+from typing import Dict
+from .okx_client import OkxClient
+from .utils.logger import logger
+from .risk import check_risk
+
+class Trader:
+    def __init__(self, client: OkxClient, strategy, config: Dict):
+        self.client = client
+        self.strategy = strategy
+        self.config = config
+        self.symbol = config['bot']['symbol']
+        self.trade_size = config['bot']['trade_size']
+
+    def handle_tick(self, price: float, market_data: Dict):
+        market_ctx = { 'trade_size': str(self.trade_size) }
+        action = self.strategy.on_tick(price, market_ctx)
+        if not action:
+            return
+        # simplistic balance retrieval; in production cache this
+        balances_resp = self.client.get_balances()
+        # parse balances (left as example)
+        # For simplicity assume USDT asset balance is present and returned as JSON structure
+        try:
+            spot_balances = balances_resp.get('data', [])[0].get('details', [])
+            usdt = 0.0
+            for x in spot_balances:
+                if x.get('ccy') == 'USDT':
+                    usdt = float(x.get('availBal', x.get('bal', 0)))
+                    break
+        except Exception:
+            usdt = 0.0
+
+        allowed = check_risk(usdt, float(action['size']), self.config['bot']['risk']['max_order_pct_balance'], self.config['bot']['risk']['max_daily_loss_pct'], 0.0)
+        if not allowed:
+            logger.info('Trade blocked by risk rules')
+            return
+
+        # Place order
+        try:
+            resp = self.client.place_order(self.symbol, action['side'], action['type'], str(action['size']))
+            logger.info(f"Order placed: {resp}")
+        except Exception as e:
+            logger.error(f"Failed to place order: {e}")
+
+### FILE: src/main.py
+"""
+Main runner for the bot. Loads config, initializes client, wires WS.
+"""
+import yaml
+import asyncio
+from .okx_client import OkxClient
+from .utils.logger import logger
+from .strategies.moving_average import MovingAverageStrategy
+from .trading import Trader
+import os
+
+CONFIG_PATH = os.path.join(os.getcwd(), 'config', 'settings.yaml')
+
+
+def load_config(path=CONFIG_PATH):
+    with open(path, 'r') as f:
+        return yaml.safe_load(f)
+
+
+async def main_loop():
+    cfg = load_config()
+    okx_cfg = cfg['okx']
+    client = OkxClient(okx_cfg['base_url'], okx_cfg['api_key'], okx_cfg['api_secret'], okx_cfg['passphrase'], timeout=okx_cfg.get('timeout', 10), max_retries=okx_cfg.get('max_retries', 3))
+
+    # Choose strategy
+    strat_cfg = cfg['bot']
+    strategy = MovingAverageStrategy(short_window=50, long_window=200)
+    trader = Trader(client, strategy, cfg)
+
+    # Simple polling loop using REST candes (instead of WS) for portability
+    symbol = cfg['bot']['symbol']
+    while True:
+        try:
+            candles = client.get_candles(symbol, bar='1m', limit=300)
+            # parse latest close price depending on OKX response structure
+            latest = candles.get('data', [])[0]
+            # OKX returns candles as [timestamp, open, high, low, close, volume]
+            close_price = float(latest[4]) if latest else None
+            if close_price:
+                trader.handle_tick(close_price, {})
+        except Exception as e:
+            logger.error(f"Main loop error: {e}")
+        await asyncio.sleep(30)
+
+
+if __name__ == '__main__':
+    asyncio.run(main_loop())
+
+### FILE: tests/test_trader.py
+"""
+Simple unit test skeleton for Trader.
+"""
+import pytest
+from src.trading import Trader
+
+def test_dummy():
+    assert True
+
+### FILE: example.env
+"""
+# Put secrets here before running
+OKX_API_KEY=your_api_key
+OKX_SECRET=your_secret
+OKX_PASSPHRASE=your_pass
+"""
+
+# End of project skeleton
+# To use: copy files into a folder, install requirements, fill config/settings.yaml and environment secrets.
