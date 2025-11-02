@@ -1,0 +1,134 @@
+Act as a senior algorithmic trading engineer.  
+Create a fully production-ready trading bot for the OKX exchange.
+
+API docs: https://www.okx.com/docs-v5/en/
+
+==========================
+ARCHITECTURE REQUIREMENTS
+==========================
+
+Build a modular project with the following structure:
+
+/config
+    settings.yaml
+/src
+    okx_client.py (or .js/.go depending on language)
+    auth.py
+    account.py
+    market.py
+    trading.py
+    risk.py
+    utils/logger.py
+    strategies/
+        basic_strategy.py
+        moving_average.py
+        breakout.py
+/main.py
+/tests
+    unit tests for all modules
+
+==========================
+OKX CLIENT REQUIREMENTS
+==========================
+
+Implement a reusable OKX client with:
+
+- REST API support
+- WebSocket support (market data + private orders)
+- API key + secret + passphrase auth
+- Signature generation (OKX HMAC)
+- Timestamp sync
+- Retry logic (exponential backoff)
+- Automatic reconnect for WebSockets
+- Handling OKX-specific error codes (10000, 50100, 50011)
+- Logging for all requests/responses (masked keys)
+
+==========================
+BOT FUNCTIONALITY
+==========================
+
+The bot must support:
+
+✅ Fetching balances  
+✅ Fetching tickers, candles, orderbook  
+✅ Placing market and limit orders  
+✅ Canceling orders  
+✅ Getting order status  
+✅ Position tracking (for futures/swap)  
+✅ PnL tracking  
+✅ Risk management module:
+   - max daily loss %
+   - max order size
+   - max leverage (if using futures)
+   - cooldown after stop-loss event
+
+==========================
+STRATEGIES MODULE
+==========================
+
+Create a flexible strategy interface with:
+
+class BaseStrategy:
+    def on_tick(self, price, market_data) -> dict:
+        """
+        Returns:
+            {
+              "side": "buy" / "sell" / None,
+              "size": float,
+              "type": "market" / "limit",
+              "price": float or None
+            }
+        """
+
+Implement example strategies:
+- Moving Average Cross (MA50/MA200)
+- Breakout strategy (high/low of previous N candles)
+- Simple buy/sell on signal
+
+==========================
+MAIN BOT LOOP
+==========================
+
+main.py should:
+
+1. Load config (API keys, trading pair, strategy, risk limits)
+2. Initialize OKX client
+3. Subscribe to WebSocket ticker feed
+4. On each price update:
+   - call strategy.on_tick()
+   - apply risk checks
+   - place/cancel orders
+5. Log every action
+6. Save performance metrics to a file
+
+==========================
+QUALITY REQUIREMENTS
+==========================
+
+- Production-ready code
+- Fully commented
+- All functions strongly typed
+- Clean architecture (no spaghetti code)
+- No unused code
+- Include example configuration file
+- Add example: running the bot with a chosen strategy
+- Provide unit tests for key modules
+
+==========================
+PARAMETERS
+==========================
+
+Language: <Python / Node.js / Go / Rust>
+Libraries allowed: standard libs + requests/httpx/websockets (for Python)
+No unnecessary dependencies.
+
+==========================
+OUTPUT
+==========================
+
+Generate:
+- full project structure  
+- all source code for each file  
+- comments + explanations  
+- example config  
+- example of running the bot  
